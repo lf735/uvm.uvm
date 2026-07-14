@@ -1,0 +1,150 @@
+// ============================================================
+// sv_grammar.lark — Structural SV grammar for UVM transpiler
+// ============================================================
+// Strategy: skip unknown tokens, extract only what we need:
+//   - class declarations
+//   - macro invocations (backtick)
+//   - function/task declarations
+//   - variable member declarations
+// ============================================================
+
+start: source_item*
+
+source_item: class_decl
+           | compiler_directive
+           | package_import
+           | typedef_decl
+           | COMMENT
+           | _skip_token
+
+// --------------- Class Declaration ---------------
+
+class_decl: "virtual"? "class" IDENT param_decl? extends_clause? implements_clause? ";" class_body "endclass" (":"IDENT)?
+
+param_decl: "#" "(" param_list ")"
+param_list: param_item ("," param_item)*
+param_item: ("parameter" | "localparam")? type_keyword? IDENT ("=" param_default)?
+param_default: expr
+
+extends_clause: "extends" scoped_type
+
+implements_clause: "implements" type_list
+
+type_list: scoped_type ("," scoped_type)*
+
+scoped_type: IDENT ("::" IDENT)* type_args?
+type_args: "#" "(" type_arg_list ")"
+type_arg_list: type_arg ("," type_arg)*
+type_arg: scoped_type | number | IDENT
+
+class_body: class_item*
+
+class_item: macro_invocation
+          | function_decl
+          | task_decl
+          | variable_decl
+          | typedef_decl
+          | compiler_directive
+          | package_import
+          | COMMENT
+          | _skip_token
+
+// --------------- Macros (backtick) ---------------
+
+macro_invocation: "`" IDENT ("(" macro_args ")")?
+macro_args: macro_arg ("," macro_arg)*
+macro_arg: /[^,()]+/
+
+// --------------- Functions & Tasks ---------------
+
+function_decl: "function" ("automatic" | "static")? func_return_type? IDENT "(" port_list? ")" ";" func_body "endfunction" (":"IDENT)?
+             | "extern" "function" ("automatic" | "static")? func_return_type? IDENT "(" port_list? ")" ";"
+
+func_return_type: "void" -> void_return
+                | type_ref
+
+task_decl: "task" ("automatic" | "static")? IDENT "(" port_list? ")" ";" func_body "endtask" (":"IDENT)?
+         | "extern" "task" ("automatic" | "static")? IDENT "(" port_list? ")" ";"
+
+func_body: func_body_item*
+func_body_item: statement | compiler_directive | COMMENT | _skip_token
+
+port_list: port_item ("," port_item)*
+port_item: port_direction? type_ref IDENT ("=" expr)?
+         | port_direction? IDENT
+port_direction: "input" | "output" | "inout" | "ref"
+
+// --------------- Variable Members ---------------
+
+variable_decl: visibility_modifier? ("static" | "protected" | "local")* type_ref IDENT array_dim* ("=" expr)? ";"
+             | visibility_modifier? ("static" | "protected" | "local")* IDENT "," IDENT ("," IDENT)* ";"
+
+visibility_modifier: "local" | "protected"
+
+array_dim: "[" "]"           -> dynamic_array
+         | "[" "$" "]"       -> queue_array
+         | "[" expr "]"      -> static_array
+         | "[" expr ":" expr "]" -> packed_array
+
+// --------------- Type References ---------------
+
+type_ref: type_keyword array_dim*
+        | scoped_type array_dim*
+
+type_keyword: "int" | "integer" | "longint" | "shortint" | "byte"
+            | "bit" | "logic" | "reg" | "wire" | "real" | "shortreal"
+            | "string" | "void" | "chandle" | "event"
+
+// --------------- Expressions (simplified) ---------------
+
+expr: number
+    | STRING_LITERAL
+    | scoped_type
+    | expr BINOP expr
+    | "'" "{" expr_list "}"
+    | "$"
+
+expr_list: expr ("," expr)*
+BINOP: "+" | "-" | "*" | "/" | "&" | "|" | "^" | "?" | ":" | "==" | "!="
+
+number: /[0-9]+('?[bdho][0-9a-fA-FxXzZ_]+)?/
+      | /[0-9]+\.[0-9]*/
+
+// --------------- Statements (for function bodies) ---------------
+
+statement: "super" "." IDENT "(" expr_list? ")" ";"  -> super_call
+         | IDENT "." IDENT "(" expr_list? ")" ";"     -> method_call
+         | IDENT "=" expr ";"                          -> assign_stmt
+         | "if" "(" expr ")" statement ("else" statement)? -> if_stmt
+         | "begin" statement* "end"                    -> block_stmt
+         | "return" expr? ";"                          -> return_stmt
+         | "assert" "(" expr ")" ";"?                  -> assert_stmt
+         | macro_invocation ";"?
+         | _skip_token
+
+// --------------- Other Constructs ---------------
+
+typedef_decl: "typedef" typedef_body IDENT ";"
+typedef_body: "enum" ("{" enum_items "}")? type_ref? -> typedef_enum
+            | "struct" ("packed")? "{" struct_body "}" -> typedef_struct
+            | type_ref                                  -> typedef_alias
+
+enum_items: IDENT ("=" number)? ("," IDENT ("=" number)?)*
+struct_body: variable_decl*
+
+package_import: "import" IDENT "::" ("*" | IDENT) ";"
+
+compiler_directive: "`" /\w+/ /[^\n]*/
+
+// --------------- Tokens ---------------
+
+IDENT: /[a-zA-Z_][a-zA-Z0-9_$]*/
+STRING_LITERAL: "\"" /[^"]*/ "\""
+
+COMMENT: /\/\/[^\n]*/
+       | /\/\*(.|\n)*?\*\//
+
+_skip_token: /[^;{}"'\/`\n\t ]+/  // catch-all for unknown tokens
+
+%ignore /\s+/
+%ignore COMMENT
