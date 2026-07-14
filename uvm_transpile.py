@@ -3,8 +3,8 @@ uvm_transpile.py
 ================
 Main orchestrator for the UVM SV Transpiler Suite.
 
-Runs the three scripts in the correct pipeline order:
-    factory_checker  →  field_macro_adder  →  constructor_checker
+Runs the four scripts in the correct pipeline order:
+    factory_checker  →  field_macro_adder  →  constructor_checker  →  prototype_updater
 
 Usage::
 
@@ -15,6 +15,7 @@ Usage::
     python uvm_transpile.py --factory path/to/sv/
     python uvm_transpile.py --fields  path/to/sv/
     python uvm_transpile.py --constructor path/to/sv/
+    python uvm_transpile.py --prototype path/to/sv/
 
     # Common options
     --recursive      Recurse into subdirectories
@@ -22,6 +23,10 @@ Usage::
     --report FILE    Write JSON report to FILE
     --verbose        Verbose console output
     --dry-run        Simulate without modifying files
+
+    # Prototype-specific options
+    --force-fix              Fix erroneous extern declarations
+    --inject-phases {all,main}  Inject missing phase stubs
 
 """
 from __future__ import annotations
@@ -42,6 +47,7 @@ from core.reporter import Reporter
 from scripts.factory_checker import process_file as factory_process
 from scripts.field_macro_adder import process_file as fields_process
 from scripts.constructor_checker import process_file as constructor_process
+from scripts.prototype_updater import process_file as prototype_process
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +69,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     script_group = p.add_mutually_exclusive_group(required=True)
     script_group.add_argument(
         "--all", dest="run_all", action="store_true",
-        help="Run all scripts in order: factory → fields → constructor",
+        help="Run all scripts in order: factory → fields → constructor → prototype",
     )
     script_group.add_argument(
         "--factory", dest="run_factory", action="store_true",
@@ -76,6 +82,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     script_group.add_argument(
         "--constructor", dest="run_constructor", action="store_true",
         help="Run constructor_checker only",
+    )
+    script_group.add_argument(
+        "--prototype", dest="run_prototype", action="store_true",
+        help="Run prototype_updater only",
     )
 
     # Paths
@@ -96,6 +106,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="Simulate without modifying any files")
 
+    # Prototype-updater options
+    p.add_argument(
+        "--force-fix", dest="force_fix", action="store_true",
+        help="(prototype_updater) Force correction of erroneous extern declarations",
+    )
+    p.add_argument(
+        "--inject-phases", dest="inject_phases",
+        choices=["all", "main"], default=None,
+        help="(prototype_updater) Inject missing phase stubs: 'main' or 'all'",
+    )
+
     return p
 
 
@@ -113,6 +134,8 @@ def run(args: argparse.Namespace) -> int:
         scripts_run.append("field_macro_adder")
     if args.run_all or args.run_constructor:
         scripts_run.append("constructor_checker")
+    if args.run_all or getattr(args, "run_prototype", False):
+        scripts_run.append("prototype_updater")
 
     reporter = Reporter(
         mode="dry-run" if args.dry_run else "fix",
@@ -136,20 +159,33 @@ def run(args: argparse.Namespace) -> int:
 
     # --- Pipeline ---
     if args.run_all or args.run_factory:
-        print("\n[1/3] Running factory_checker...")
+        print("\n[1/4] Running factory_checker...")
         for f in files:
             factory_process(f, taxonomy, reporter, backup=backup, dry_run=args.dry_run)
 
     if args.run_all or args.run_fields:
-        print("\n[2/3] Running field_macro_adder...")
+        print("\n[2/4] Running field_macro_adder...")
         # Re-parse files after factory_checker may have modified them
         for f in files:
             fields_process(f, taxonomy, reporter, backup=backup, dry_run=args.dry_run)
 
     if args.run_all or args.run_constructor:
-        print("\n[3/3] Running constructor_checker...")
+        print("\n[3/4] Running constructor_checker...")
         for f in files:
             constructor_process(f, taxonomy, reporter, backup=backup, dry_run=args.dry_run)
+
+    if args.run_all or getattr(args, "run_prototype", False):
+        print("\n[4/4] Running prototype_updater...")
+        force_fix    = getattr(args, "force_fix", False)
+        inject_phases = getattr(args, "inject_phases", None)
+        for f in files:
+            prototype_process(
+                f, taxonomy, reporter,
+                backup=backup,
+                dry_run=args.dry_run,
+                force_fix=force_fix,
+                inject_phases=inject_phases,
+            )
 
     # --- Summary ---
     reporter.print_summary(verbose=args.verbose)

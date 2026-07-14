@@ -8,6 +8,7 @@ Provides:
   - UVMTaxonomy: resolves a parent class name to its UVM family
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from enum import Enum, auto
 
 
@@ -15,6 +16,59 @@ class UVMFamily(Enum):
     COMPONENT = auto()
     OBJECT = auto()
     UNKNOWN = auto()
+
+
+@dataclass
+class PhaseProto:
+    """Expected prototype for a UVM phase method."""
+    name: str
+    is_task: bool          # True = task, False = function void
+    return_type: str       # "" for tasks, "void" for function phases
+    param: str             # canonical parameter string, e.g. "uvm_phase phase"
+    is_main: bool          # True if in the 'main' subset (build/connect/run)
+
+
+# ---------------------------------------------------------------------------
+# UVM standard phase prototypes
+# ---------------------------------------------------------------------------
+_FUNCTION_PHASES = {
+    "build_phase":               True,   # is_main
+    "connect_phase":             True,
+    "end_of_elaboration_phase":  False,
+    "start_of_simulation_phase": False,
+    "extract_phase":             False,
+    "check_phase":               False,
+    "report_phase":              False,
+    "final_phase":               False,
+}
+_TASK_PHASES = {
+    "run_phase":            True,   # is_main
+    "pre_reset_phase":      False,
+    "reset_phase":          False,
+    "post_reset_phase":     False,
+    "pre_configure_phase":  False,
+    "configure_phase":      False,
+    "post_configure_phase": False,
+    "pre_main_phase":       False,
+    "main_phase":           False,
+    "post_main_phase":      False,
+    "pre_shutdown_phase":   False,
+    "shutdown_phase":       False,
+    "post_shutdown_phase":  False,
+}
+
+UVM_PHASE_PROTOTYPES: dict[str, PhaseProto] = {}
+for _name, _is_main in _FUNCTION_PHASES.items():
+    UVM_PHASE_PROTOTYPES[_name] = PhaseProto(
+        name=_name, is_task=False, return_type="void",
+        param="uvm_phase phase", is_main=_is_main,
+    )
+for _name, _is_main in _TASK_PHASES.items():
+    UVM_PHASE_PROTOTYPES[_name] = PhaseProto(
+        name=_name, is_task=True, return_type="",
+        param="uvm_phase phase", is_main=_is_main,
+    )
+del _name, _is_main
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +226,8 @@ class UVMTaxonomy:
         elif "object" in name:
             return UVMFamily.OBJECT, False, is_begin
         return UVMFamily.UNKNOWN, False, is_begin
+
+    @staticmethod
+    def get_phase_prototype(name: str) -> "PhaseProto | None":
+        """Return the PhaseProto for a UVM standard phase method, or None if unknown."""
+        return UVM_PHASE_PROTOTYPES.get(name)

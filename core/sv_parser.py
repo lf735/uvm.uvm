@@ -48,6 +48,9 @@ class SVFunction:
     super_call_line: Optional[int] = None
     start_line: int = 0      # 1-based
     end_line: int = 0
+    return_type: str = ""    # e.g. "void", "int", "" (empty for tasks)
+    is_task: bool = False    # True if declared as 'task', False if 'function'
+    is_extern: bool = False  # True if prefixed with 'extern'
 
 
 @dataclass
@@ -121,12 +124,11 @@ _RE_MACRO = re.compile(
 _RE_FUNC_START = re.compile(
     r"""
     ^\s*
-    (?:extern\s+)?
+    (?P<extern>extern\s+)?
     (?:virtual\s+)?
     (?:automatic\s+|static\s+)?
     function\s+
-    (?:void\s+|automatic\s+)?
-    (?:[\w:]+\s+)?          # optional return type
+    (?:(?P<rettype>void|automatic|[\w:]+)\s+)?  # optional return type
     (?P<name>[A-Za-z_]\w*)  # function name
     \s*\(
     """,
@@ -135,7 +137,7 @@ _RE_FUNC_START = re.compile(
 _RE_TASK_START = re.compile(
     r"""
     ^\s*
-    (?:extern\s+)?
+    (?P<extern>extern\s+)?
     (?:virtual\s+)?
     (?:automatic\s+)?
     task\s+
@@ -361,13 +363,17 @@ class _LineScanner:
             # function/task
             f_match = _RE_FUNC_START.match(raw)
             if f_match and depth == 1:
-                func, i = self._parse_function(i, f_match.group("name"), is_task=False)
+                func, i = self._parse_function(i, f_match.group("name"), is_task=False,
+                                               return_type=(f_match.group("rettype") or "").strip(),
+                                               is_extern=bool(f_match.group("extern")))
                 cls.functions.append(func)
                 continue
 
             t_match = _RE_TASK_START.match(raw)
             if t_match and depth == 1:
-                func, i = self._parse_function(i, t_match.group("name"), is_task=True)
+                func, i = self._parse_function(i, t_match.group("name"), is_task=True,
+                                               return_type="",
+                                               is_extern=bool(t_match.group("extern")))
                 cls.functions.append(func)
                 continue
 
@@ -389,9 +395,11 @@ class _LineScanner:
     # Function parsing
     # ------------------------------------------------------------------
 
-    def _parse_function(self, start_i: int, name: str, is_task: bool) -> tuple[SVFunction, int]:
+    def _parse_function(self, start_i: int, name: str, is_task: bool,
+                         return_type: str = "", is_extern: bool = False) -> tuple[SVFunction, int]:
         """Parse a function body, detect super.new calls."""
-        func = SVFunction(name=name, start_line=start_i + 1)
+        func = SVFunction(name=name, start_line=start_i + 1,
+                          is_task=is_task, return_type=return_type, is_extern=is_extern)
         i = start_i
 
         # collect full port list (may span lines)

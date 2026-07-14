@@ -1,9 +1,9 @@
-# UVM SV Transpiler Suite — Plan d'implémentation v2 ✅ IMPLÉMENTÉ
+# UVM SV Transpiler Suite — Plan d'implémentation v3 ✅ IMPLÉMENTÉ
 
 Suite de scripts Python de transpilation de fichiers SystemVerilog (`.sv`) pour environnement UVM.
 Ce document est le plan d'implémentation **approuvé et entièrement exécuté**.
 
-> **État** : ✅ Implémentation complète — 34/34 tests passent — 2026-07-14
+> **État** : ✅ Implémentation complète — 55/55 tests passent — 2026-07-14
 
 ---
 
@@ -11,12 +11,13 @@ Ce document est le plan d'implémentation **approuvé et entièrement exécuté*
 
 | Question | Décision |
 |---|---|
-| Scope V1 | Factory macros + `uvm_field_*` + vérification `new()` |
+| Scope V1 | Factory macros + `uvm_field_*` + vérification `new()` + prototypes de phases |
 | Mode de modification | **In-place avec backup** (`.sv.bak`) |
 | Classes paramétrées | **Oui**, supportées (`_param_utils`) |
 | Rapport | Option CLI `--report <file.json>` + résumé console activable par `--verbose` |
 | Exécution | Chaque script est indépendant + orchestrateur `uvm_transpile.py` |
 | Parser | **Bibliothèque `lark`** (grammaire SV partielle/structurelle) |
+| Prototypes phases | Correction auto si extern OK + corps KO ; report-only sinon ; `--force-fix` pour tout corriger |
 | Versions futures | V2 : construction et connexion automatique d'environnement UVM |
 
 ---
@@ -29,11 +30,12 @@ uvm/
 ├── scripts/
 │   ├── factory_checker.py        # Script 1 : macros `uvm_*_utils`
 │   ├── field_macro_adder.py      # Script 2 : macros `uvm_field_*`
-│   └── constructor_checker.py   # Script 3 : vérification/ajout de new()
+│   ├── constructor_checker.py   # Script 3 : vérification/ajout de new()
+│   └── prototype_updater.py     # Script 4 : vérification/correction prototypes phases UVM
 ├── core/
-│   ├── sv_parser.py              # Parser Lark : détection de classes, membres, macros
+│   ├── sv_parser.py              # Parser Lark : détection de classes, membres, macros, fonctions
 │   ├── sv_grammar.lark           # Grammaire Lark SV structurelle
-│   ├── uvm_taxonomy.py           # Hiérarchie UVM, règles de classification
+│   ├── uvm_taxonomy.py           # Hiérarchie UVM, règles de classification, PhaseProto
 │   ├── file_io.py                # Lecture/écriture in-place avec backup
 │   └── reporter.py               # Rapport JSON + sortie console
 ├── tests/
@@ -43,10 +45,12 @@ uvm/
 │   │   ├── parameterized_class.sv
 │   │   ├── multi_class_file.sv
 │   │   ├── no_constructor.sv
+│   │   ├── wrong_phase_sig.sv    # Fixture Script 4
 │   │   └── ...
 │   ├── test_factory_checker.py
 │   ├── test_field_macro_adder.py
-│   └── test_constructor_checker.py
+│   ├── test_constructor_checker.py
+│   └── test_prototype_updater.py
 ├── requirements.txt              # lark, pytest, colorama
 └── README.md
 ```
@@ -235,6 +239,91 @@ Pour chaque SVClass :
 
 ---
 
+## Script 4 : `prototype_updater.py` — Prototypes de phases UVM
+
+### Rôle
+
+Vérifie et corrige les signatures des méthodes de phases UVM (`build_phase`, `run_phase`, etc.)
+dans les classes dérivées de `uvm_component`. Ne touche pas les méthodes utilisateur non-standard.
+
+### Décisions de conception
+
+| Comportement | Règle |
+|---|---|
+| Extern erronée | **Reporter `PROTOTYPE_ERROR` uniquement** (pas de modification) |
+| Extern erronée + `--force-fix` | Corriger l'extern et le corps |
+| Extern correcte + corps erroné | **Corriger le corps automatiquement** (sans `--force-fix`) |
+| Corps seul erroné | Reporter `PROTOTYPE_ERROR` uniquement |
+| Corps seul erroné + `--force-fix` | Corriger le corps |
+| Méthode utilisateur (non-UVM) | **Ignorée** |
+| Classe `UNKNOWN` ou `uvm_object` | **Ignorée** (phases = composants uniquement) |
+
+### Phases UVM reconnues (21 phases)
+
+| Méthode | Kind | Return type |
+|---|---|---|
+| `build_phase`, `connect_phase` | `function` | `void` |
+| `end_of_elaboration_phase`, `start_of_simulation_phase` | `function` | `void` |
+| `extract_phase`, `check_phase`, `report_phase`, `final_phase` | `function` | `void` |
+| `run_phase` | `task` | *(n/a)* |
+| `pre_reset_phase` … `post_shutdown_phase` (10 phases) | `task` | *(n/a)* |
+
+Toutes les phases prennent un unique paramètre : `uvm_phase phase`.
+
+**Phases "main"** (pour `--inject-phases main`) : `build_phase`, `connect_phase`, `run_phase`.
+
+### Algorithme
+
+```
+Pour chaque SVClass de famille COMPONENT :
+  Pour chaque SVFunction dont le nom est dans UVM_PHASE_PROTOTYPES :
+    (si func.name == "new" → skip)
+
+    1. Extern déclaration présente ?
+       ├─ OUI :
+       │   ├─ Extern CORRECTE ?
+       │   │   ├─ OUI → Corps présent et erroné ? → Corriger le corps (auto)
+       │   │   │         Corps correct / absent   → PROTOTYPE_OK
+       │   │   └─ NON → PROTOTYPE_ERROR reporté
+       │   │             Si --force-fix → corriger extern + corps
+       └─ NON (corps seul) :
+           ├─ Corps CORRECT → PROTOTYPE_OK
+           └─ Corps ERRONÉ  → PROTOTYPE_ERROR reporté
+                              Si --force-fix → corriger le corps
+
+  Option --inject-phases :
+    Phases absentes (nom pas dans cls.functions) :
+      "main" → injecter build_phase, connect_phase, run_phase
+      "all"  → injecter les 21 phases standard
+    Position : après les dernières macros factory/field
+```
+
+### Reconstruction d'une ligne de déclaration
+
+La reconstruction conserve :
+- L'indentation originale
+- Les modificateurs `virtual` et `override`
+- Le préfixe `extern` si applicable
+
+Elle remplace uniquement :
+- Le mot-clé `function`/`task`
+- Le type de retour
+- La liste de paramètres
+
+### Options CLI spécifiques
+
+| Option | Effet |
+|---|---|
+| `--force-fix` | Force la correction même des déclarations `extern` erronées |
+| `--inject-phases main` | Injecte `build_phase`, `connect_phase`, `run_phase` si absentes |
+| `--inject-phases all` | Injecte les 21 phases UVM standard si absentes |
+
+> [!NOTE]
+> L'injection crée des stubs minimalistes : `super.<phase>(phase);` pour les `function void`,
+> et un commentaire `// TODO` pour les `task` (car l'appel super n'est pas toujours approprié).
+
+---
+
 ## Orchestrateur `uvm_transpile.py`
 
 ```bash
@@ -245,6 +334,7 @@ python uvm_transpile.py --all path/to/sv/
 python uvm_transpile.py --factory path/to/sv/
 python uvm_transpile.py --fields  path/to/sv/
 python uvm_transpile.py --constructor path/to/sv/
+python uvm_transpile.py --prototype path/to/sv/
 
 # Options communes
 --recursive           Parcourt les sous-répertoires
@@ -252,14 +342,19 @@ python uvm_transpile.py --constructor path/to/sv/
 --report out.json     Génère un rapport JSON
 --verbose             Sortie console détaillée
 --dry-run             Simule sans modifier les fichiers
+
+# Options prototype_updater
+--force-fix                    Force la correction des extern erronées
+--inject-phases {all,main}     Injecte les stubs de phases manquants
 ```
 
 ### Ordre d'exécution (pipeline)
 
 ```
-factory_checker  →  field_macro_adder  →  constructor_checker
+factory_checker  →  field_macro_adder  →  constructor_checker  →  prototype_updater
 ```
 L'ordre est important : `field_macro_adder` dépend du bloc `_begin/end` créé par `factory_checker`.
+`prototype_updater` est indépendant mais bénéficie d'un fichier déjà nettoyé par les 3 premiers scripts.
 
 ---
 
@@ -361,6 +456,16 @@ L'ordre est important : `field_macro_adder` dépend du bloc `_begin/end` créé 
 - [x] 34/34 tests pytest passent
 - [x] Smoke test sur rapport JSON (`report_test.json` généré correctement)
 
+### Phase 7 — Script 4 : `prototype_updater.py` ✅
+- [x] `core/sv_parser.py` : ajout `SVFunction.return_type`, `.is_task`, `.is_extern`
+- [x] `core/uvm_taxonomy.py` : `PhaseProto` dataclass + table `UVM_PHASE_PROTOTYPES` (21 phases) + `get_phase_prototype()`
+- [x] `core/reporter.py` : 4 nouveaux `ActionType` (`PROTOTYPE_FIXED`, `PROTOTYPE_OK`, `PROTOTYPE_ERROR`, `PROTOTYPE_INJECTED`)
+- [x] `scripts/prototype_updater.py` : script complet avec logique déclaration/prototype, `--force-fix`, `--inject-phases`
+- [x] `tests/fixtures/wrong_phase_sig.sv` : 4 classes couvrant les cas principaux
+- [x] `tests/test_prototype_updater.py` : 21 tests — helpers unitaires + intégration + idempotence
+- [x] `uvm_transpile.py` : pipeline 4 étapes + options `--prototype`, `--force-fix`, `--inject-phases`
+- [x] 55/55 tests pytest passent
+
 ---
 
 ## Résultats de l'implémentation
@@ -368,15 +473,16 @@ L'ordre est important : `field_macro_adder` dépend du bloc `_begin/end` créé 
 ### Tests
 
 ```
-34 passed in 0.24s
+55 passed in 0.27s
 ```
 
 | Suite | Tests | Résultat |
 |---|---|---|
-| `test_factory_checker.py` | 19 | ✅ |
-| `test_field_macro_adder.py` | 12 | ✅ |
-| `test_constructor_checker.py` | 7 | ✅ |
-| **Total** | **34** | **✅** |
+| `test_factory_checker.py` | 7 | ✅ |
+| `test_field_macro_adder.py` | 14 | ✅ |
+| `test_constructor_checker.py` | 13 | ✅ |
+| `test_prototype_updater.py` | 21 | ✅ |
+| **Total** | **55** | **✅** |
 
 ### Smoke test (dry-run sur les fixtures)
 

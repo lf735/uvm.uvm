@@ -35,6 +35,10 @@ class ActionType:
     CONSTRUCTOR_ADDED = "CONSTRUCTOR_ADDED"
     CONSTRUCTOR_FIXED = "CONSTRUCTOR_FIXED"
     CONSTRUCTOR_OK  = "CONSTRUCTOR_OK"
+    PROTOTYPE_FIXED    = "PROTOTYPE_FIXED"    # Phase signature corrected
+    PROTOTYPE_OK       = "PROTOTYPE_OK"       # Phase signature already correct
+    PROTOTYPE_ERROR    = "PROTOTYPE_ERROR"    # Declaration wrong — reported only
+    PROTOTYPE_INJECTED = "PROTOTYPE_INJECTED" # Phase stub injected (--inject-phases)
     SKIPPED         = "SKIPPED"
 
 
@@ -70,6 +74,9 @@ class Reporter:
             "field_macros_added": 0,
             "constructors_added": 0,
             "constructors_fixed": 0,
+            "prototypes_fixed": 0,
+            "prototypes_errors": 0,
+            "prototypes_injected": 0,
         }
 
     # ------------------------------------------------------------------
@@ -135,6 +142,12 @@ class Reporter:
             self._action_counts["constructors_added"] += 1
         elif action_type == ActionType.CONSTRUCTOR_FIXED:
             self._action_counts["constructors_fixed"] += 1
+        elif action_type == ActionType.PROTOTYPE_FIXED:
+            self._action_counts["prototypes_fixed"] += 1
+        elif action_type == ActionType.PROTOTYPE_ERROR:
+            self._action_counts["prototypes_errors"] += 1
+        elif action_type == ActionType.PROTOTYPE_INJECTED:
+            self._action_counts["prototypes_injected"] += 1
 
     def add_warning(self, path: "str | Path", class_name: str, message: str) -> None:
         """Record a warning."""
@@ -196,6 +209,9 @@ class Reporter:
         print(f"  Field macros added   : {actions['field_macros_added']}")
         print(f"  Constructors added   : {actions['constructors_added']}")
         print(f"  Constructors fixed   : {actions['constructors_fixed']}")
+        print(f"  Prototypes fixed     : {actions.get('prototypes_fixed', 0)}")
+        print(f"  Prototype errors     : {actions.get('prototypes_errors', 0)}")
+        print(f"  Prototypes injected  : {actions.get('prototypes_injected', 0)}")
 
         if data["warnings"]:
             print()
@@ -210,7 +226,8 @@ class Reporter:
             for fentry in data["files"]:
                 for cls in fentry["classes"]:
                     for act in cls["actions"]:
-                        if act["type"] in (ActionType.FACTORY_OK, ActionType.FIELD_OK, ActionType.CONSTRUCTOR_OK):
+                        if act["type"] in (ActionType.FACTORY_OK, ActionType.FIELD_OK,
+                                            ActionType.CONSTRUCTOR_OK, ActionType.PROTOTYPE_OK):
                             continue
                         line_info = f" (line {act['line']})" if act.get("line") else ""
                         macro_info = f" {act['macro']}" if act.get("macro") else ""
